@@ -79,25 +79,7 @@ cd ~/5g-rrc-storm
 ./scripts/log-amf.sh
 ```
 
-## 6. Prepare files used by the NMS
-
-The NMS reads these files from the host:
-
-```bash
-~/openairinterface5g/sib8.conf
-~/openairinterface5g/gnb.logs
-```
-
-Create missing files if needed:
-
-```bash
-touch ~/openairinterface5g/sib8.conf
-touch ~/openairinterface5g/gnb.logs
-```
-
-The `sib8.conf` file is used because the same NMS can also be used with the previous SIB8 work: [5g-sib8-alert](https://github.com/5gattacks/5g-sib8-alert.git).
-
-## 7. Start the NMS
+## 6. Start the NMS
 
 The NMS uses the Docker images:
 
@@ -130,7 +112,7 @@ If the OAI core Docker network exists, the NMS starts attached to it. This allow
 
 If the core network is not running, the NMS can still start, but the SIM/subscriber page may not work.
 
-## 8. Run the mitigated gNB
+## 7. Run the mitigated gNB
 
 For RF simulator mode, run:
 
@@ -160,7 +142,7 @@ cd ~/5g-rrc-storm
 ./scripts/run-gnb-mitigation.sh
 ```
 
-## 9. Run the attack UE
+## 8. Run the attack UE
 
 For RF simulator mode, run:
 
@@ -192,7 +174,7 @@ Make sure the UE parameters match the gNB configuration:
 --band
 ```
 
-## 10. Run order
+## 9. Run order
 
 Use separate terminals.
 
@@ -235,6 +217,28 @@ cd ~/5g-rrc-storm
 ```bash
 cd ~/5g-rrc-storm
 ./scripts/run-attacker-ue-rfsim.sh
+```
+
+## 10. Stop everything
+
+Stop the UE and gNB using:
+
+```bash
+Ctrl+C
+```
+
+Stop the NMS:
+
+```bash
+cd ~/5g-rrc-storm
+./stop-nms.sh
+```
+
+Stop the core:
+
+```bash
+cd ~/5g-rrc-storm
+./scripts/stop-core.sh
 ```
 
 ## 11. Configurable constants
@@ -339,28 +343,6 @@ For attack changes:
 ```bash
 cd ~/rrc-storm-attack/cmake_targets
 ./build_oai -w USRP --ninja --nrUE --gNB --build-lib "nrscope" -C
-```
-
-## 13. Stop everything
-
-Stop the UE and gNB using:
-
-```bash
-Ctrl+C
-```
-
-Stop the NMS:
-
-```bash
-cd ~/5g-rrc-storm
-./stop-nms.sh
-```
-
-Stop the core:
-
-```bash
-cd ~/5g-rrc-storm
-./scripts/stop-core.sh
 ```
 
 ## Disclaimer

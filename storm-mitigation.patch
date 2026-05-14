@@ -1,0 +1,589 @@
+diff --git a/common/utils/ocp_itti/intertask_interface.h b/common/utils/ocp_itti/intertask_interface.h
+index 8f4e25d8b1..a36d325e52 100644
+--- a/common/utils/ocp_itti/intertask_interface.h
++++ b/common/utils/ocp_itti/intertask_interface.h
+@@ -40,6 +40,10 @@ typedef struct {
+   long  timer_id;
+ } timer_has_expired_t;
+ 
++typedef struct rrc_storm_ue_timeout_s{
++  uint32_t rrc_ue_id;
++}rrc_storm_ue_timeout_t;
++
+ typedef struct {
+   uint32_t      interval_sec;
+   uint32_t      interval_us;
+@@ -355,6 +359,7 @@ typedef enum message_priorities_e {
+ 
+ #define FOREACH_MSG(INTERNAL_MSG)         \
+   INTERNAL_MSG(TIMER_HAS_EXPIRED,  MESSAGE_PRIORITY_MED, timer_has_expired_t, timer_has_expired) \
++  INTERNAL_MSG(RRC_STORM_UE_TIMEOUT,  MESSAGE_PRIORITY_MED, rrc_storm_ue_timeout_t, rrc_storm_ue_timeout) \
+   INTERNAL_MSG(INITIALIZE_MESSAGE, MESSAGE_PRIORITY_MED, IttiMsgEmpty, initialize_message)  \
+   INTERNAL_MSG(ACTIVATE_MESSAGE,   MESSAGE_PRIORITY_MED, IttiMsgEmpty, activate_message) \
+   INTERNAL_MSG(DEACTIVATE_MESSAGE, MESSAGE_PRIORITY_MED, IttiMsgEmpty, deactivate_message)  \
+@@ -422,6 +427,8 @@ typedef struct MessageDef_s {
+ #define ITTI_MSG_DESTINATION_NAME(mSGpTR)   itti_get_task_name(ITTI_MSG_DESTINATION_ID(mSGpTR))
+ #define TIMER_HAS_EXPIRED(mSGpTR)           (mSGpTR)->ittiMsg.timer_has_expired
+ 
++#define RRC_STORM_UE_TIMEOUT(mSGpTR)      (mSGpTR)->ittiMsg.rrc_storm_ue_timeout
++
+ #define INSTANCE_DEFAULT    (UINT16_MAX - 1)
+ 
+ #ifdef __cplusplus
+diff --git a/openair2/COMMON/f1ap_messages_types.h b/openair2/COMMON/f1ap_messages_types.h
+index e44e1dccb4..a5a003d82a 100644
+--- a/openair2/COMMON/f1ap_messages_types.h
++++ b/openair2/COMMON/f1ap_messages_types.h
+@@ -345,6 +345,7 @@ typedef struct f1ap_initial_ul_rrc_message_s {
+   uint64_t nr_cellid;
+   /// crnti
+   uint16_t crnti;
++  int16_t timing_advance;
+   uint8_t *rrc_container;
+   int      rrc_container_length;
+   uint8_t *du2cu_rrc_container;
+@@ -627,6 +628,13 @@ typedef struct f1ap_ue_context_rel_cmd_t {
+   uint32_t *old_gNB_DU_ue_id; // if after reestablishment request
+ } f1ap_ue_context_rel_cmd_t;
+ 
++
++
++typedef struct f1ap_storm_ue_action_cmd_t {
++  uint32_t gNB_CU_ue_id;
++  uint32_t gNB_DU_ue_id; 
++} f1ap_storm_ue_action_cmd_t;
++
+ typedef struct f1ap_ue_context_rel_cplt_t {
+   uint32_t gNB_CU_ue_id;
+   uint32_t gNB_DU_ue_id;
+diff --git a/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_RA.c b/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_RA.c
+index 8478df8916..2bab86a7e6 100644
+--- a/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_RA.c
++++ b/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_RA.c
+@@ -705,6 +705,7 @@ void nr_initiate_ra_proc(module_id_t module_idP,
+   if (!UE) {
+     /* in CBRA: we don't know this UE yet. There might be CFRA (e.g., HO IN SA)
+      * where we know the UE */
++
+     rnti_t rnti;
+     bool rnti_found = nr_mac_get_new_rnti(&nr_mac->UE_info, &rnti);
+     if (!rnti_found) {
+diff --git a/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_primitives.c b/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_primitives.c
+index 128f2db336..825f3254b7 100644
+--- a/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_primitives.c
++++ b/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_primitives.c
+@@ -3764,7 +3764,7 @@ void beam_selection_procedures(gNB_MAC_INST *mac, NR_UE_info_t *UE)
+   UE->UE_beam_index = new_bf_index;
+ }
+ 
+-void send_initial_ul_rrc_message(int rnti, const uint8_t *sdu, sdu_size_t sdu_len, void *data)
++void send_initial_ul_rrc_message(int rnti, uint8_t *sdu, sdu_size_t sdu_len, void *data)
+ {
+   gNB_MAC_INST *mac = RC.nrmac[0];
+   NR_UE_info_t *UE = (NR_UE_info_t *)data;
+@@ -3782,6 +3782,7 @@ void send_initial_ul_rrc_message(int rnti, const uint8_t *sdu, sdu_size_t sdu_le
+     .nr_cellid = mac->f1_config.setup_req->cell[0].info.nr_cellid,
+     .gNB_DU_ue_id = rnti,
+     .crnti = rnti,
++    .timing_advance = UE->ra->timing_offset,
+     .rrc_container = (uint8_t *) sdu,
+     .rrc_container_length = sdu_len,
+     .du2cu_rrc_container = encoded_len ? (uint8_t *) du2cu : NULL,
+@@ -3806,7 +3807,7 @@ bool prepare_initial_ul_rrc_message(gNB_MAC_INST *mac, NR_UE_info_t *UE)
+       // if the UE list is full, we should reject the UE with an RRC reject message
+       // to signal the upper layers to send a reject we send an empty CellGroup information element
+       UE->CellGroup = NULL;
+-      LOG_W(NR_MAC, "Maximum number of UE alllowed at DU reached. Cannot serve UE %04x", UE->rnti);
++      LOG_W(NR_MAC, "Maximum number of UE allowed at DU reached. Cannot serve UE %04x", UE->rnti);
+       return true;
+     }
+   }
+diff --git a/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_ulsch.c b/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_ulsch.c
+index 3f546d41b4..683f25bb4b 100644
+--- a/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_ulsch.c
++++ b/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_ulsch.c
+@@ -462,6 +462,7 @@ static int nr_process_mac_pdu(instance_t module_idP,
+ 
+         if (prepare_initial_ul_rrc_message(RC.nrmac[module_idP], UE)) {
+           nr_mac_rlc_data_ind(module_idP, UE->rnti, true, 0, (char *)(pduP + mac_subheader_len), mac_len);
++          //Here Msg3 is forwarded to the RRC layer through initial_ul_rrc_message_transfer_direct in mac_rrc_ul_direct.c
+         } else {
+           LOG_E(NR_MAC, "prepare_initial_ul_rrc_message() returned false, cannot forward CCCH message\n");
+         }
+diff --git a/openair2/LAYER2/NR_MAC_gNB/mac_proto.h b/openair2/LAYER2/NR_MAC_gNB/mac_proto.h
+index 29398c9edf..1963c7b743 100644
+--- a/openair2/LAYER2/NR_MAC_gNB/mac_proto.h
++++ b/openair2/LAYER2/NR_MAC_gNB/mac_proto.h
+@@ -460,7 +460,7 @@ long get_lcid_from_drbid(int drb_id);
+ long get_lcid_from_srbid(int srb_id);
+ 
+ bool prepare_initial_ul_rrc_message(gNB_MAC_INST *mac, NR_UE_info_t *UE);
+-void send_initial_ul_rrc_message(int rnti, const uint8_t *sdu, sdu_size_t sdu_len, void *data);
++void send_initial_ul_rrc_message(int rnti, uint8_t *sdu, sdu_size_t sdu_len, void *data);
+ 
+ void finish_nr_dl_harq(NR_UE_sched_ctrl_t *sched_ctrl, int harq_pid);
+ void abort_nr_dl_harq(NR_UE_info_t* UE, int8_t harq_pid);
+diff --git a/openair2/LAYER2/NR_MAC_gNB/mac_rrc_dl_handler.c b/openair2/LAYER2/NR_MAC_gNB/mac_rrc_dl_handler.c
+index cf0f2286bc..37c9dd97cd 100644
+--- a/openair2/LAYER2/NR_MAC_gNB/mac_rrc_dl_handler.c
++++ b/openair2/LAYER2/NR_MAC_gNB/mac_rrc_dl_handler.c
+@@ -994,3 +994,28 @@ void dl_rrc_message_transfer(const f1ap_dl_rrc_message_t *dl_rrc)
+   /* the DU ue id is the RNTI */
+   nr_rlc_srb_recv_sdu(dl_rrc->gNB_DU_ue_id, dl_rrc->srb_id, dl_rrc->rrc_container, dl_rrc->rrc_container_length);
+ }
++
++void storm_ue_action_command(const f1ap_storm_ue_action_cmd_t *cmd){
++  /* mark UE as to be deleted after PUSCH failure */
++  gNB_MAC_INST *mac = RC.nrmac[0];
++  NR_SCHED_LOCK(&mac->sched_lock);
++
++  NR_UE_info_t *UE = find_nr_UE(&mac->UE_info, cmd->gNB_DU_ue_id);
++  UE = UE ? UE : find_ra_UE(&mac->UE_info, cmd->gNB_DU_ue_id);
++
++  if (UE == NULL) {
++    NR_SCHED_UNLOCK(&mac->sched_lock);
++    return;
++  }
++
++  LOG_W(MAC, "Storm action command: Removing UE %d\n", cmd->gNB_DU_ue_id);
++
++  instance_t f1inst = get_f1_gtp_instance();
++  if (f1inst >= 0)
++    newGtpuDeleteAllTunnels(f1inst, cmd->gNB_DU_ue_id);
++
++  nr_mac_release_ue(mac, cmd->gNB_DU_ue_id);
++
++
++  NR_SCHED_UNLOCK(&mac->sched_lock);
++}
+diff --git a/openair2/LAYER2/NR_MAC_gNB/mac_rrc_dl_handler.h b/openair2/LAYER2/NR_MAC_gNB/mac_rrc_dl_handler.h
+index 1ba31f8e80..90f42264f9 100644
+--- a/openair2/LAYER2/NR_MAC_gNB/mac_rrc_dl_handler.h
++++ b/openair2/LAYER2/NR_MAC_gNB/mac_rrc_dl_handler.h
+@@ -40,4 +40,6 @@ void ue_context_release_command(const f1ap_ue_context_rel_cmd_t *cmd);
+ 
+ void dl_rrc_message_transfer(const f1ap_dl_rrc_message_t *dl_rrc);
+ 
++void storm_ue_action_command(const f1ap_storm_ue_action_cmd_t *cmd);
++
+ #endif /* MAC_RRC_DL_HANDLER_H */
+diff --git a/openair2/LAYER2/nr_pdcp/nr_pdcp_oai_api.c b/openair2/LAYER2/nr_pdcp/nr_pdcp_oai_api.c
+index 3fd4c4bdd4..f796ea76ae 100644
+--- a/openair2/LAYER2/nr_pdcp/nr_pdcp_oai_api.c
++++ b/openair2/LAYER2/nr_pdcp/nr_pdcp_oai_api.c
+@@ -764,7 +764,6 @@ bool nr_pdcp_data_req_srb(ue_id_t ue_id,
+     LOG_E(PDCP, "no SRB found (ue_id %ld, rb_id %ld)\n", ue_id, rb_id);
+     return 0;
+   }
+-
+   int max_size = nr_max_pdcp_pdu_size(sdu_buffer_size);
+   char pdu_buf[max_size];
+   int pdu_size = rb->process_sdu(rb, (char *)sdu_buffer, sdu_buffer_size, muiP, pdu_buf, max_size);
+@@ -773,9 +772,7 @@ bool nr_pdcp_data_req_srb(ue_id_t ue_id,
+     return 0;
+   }
+   AssertFatal(rb->deliver_pdu == NULL, "SRB callback should be NULL, to be provided on every invocation\n");
+-
+   nr_pdcp_manager_unlock(nr_pdcp_ue_manager);
+-
+   deliver_pdu_cb(data, ue_id, rb_id, pdu_buf, pdu_size, muiP);
+ 
+   return 1;
+diff --git a/openair2/LAYER2/nr_rlc/nr_rlc_oai_api.c b/openair2/LAYER2/nr_rlc/nr_rlc_oai_api.c
+index 126f9fb51c..0f456c13b2 100644
+--- a/openair2/LAYER2/nr_rlc/nr_rlc_oai_api.c
++++ b/openair2/LAYER2/nr_rlc/nr_rlc_oai_api.c
+@@ -884,7 +884,7 @@ void deliver_sdu_srb0(void *deliver_sdu_data, struct nr_rlc_entity_t *entity,
+ 
+ bool nr_rlc_activate_srb0(int ue_id,
+                           void *data,
+-                          void (*send_initial_ul_rrc_message)(int ue_id, const uint8_t *sdu, sdu_size_t sdu_len, void *data))
++                          void (*send_initial_ul_rrc_message)(int ue_id, uint8_t *sdu, sdu_size_t sdu_len, void *data))
+ {
+   nr_rlc_manager_lock(nr_rlc_ue_manager);
+   nr_rlc_ue_t *ue = nr_rlc_manager_get_ue(nr_rlc_ue_manager, ue_id);
+diff --git a/openair2/LAYER2/nr_rlc/nr_rlc_oai_api.h b/openair2/LAYER2/nr_rlc/nr_rlc_oai_api.h
+index 454a59b928..3b2893a987 100644
+--- a/openair2/LAYER2/nr_rlc/nr_rlc_oai_api.h
++++ b/openair2/LAYER2/nr_rlc/nr_rlc_oai_api.h
+@@ -88,6 +88,6 @@ void nr_rlc_srb_recv_sdu(const int ue_id, const logical_chan_id_t channel_id, un
+ 
+ bool nr_rlc_activate_srb0(int ue_id,
+                           void *data,
+-                          void (*send_initial_ul_rrc_message)(int rnti, const uint8_t *sdu, sdu_size_t sdu_len, void *data));
++                          void (*send_initial_ul_rrc_message)(int rnti, uint8_t *sdu, sdu_size_t sdu_len, void *data));
+ 
+ bool nr_rlc_get_statistics(int ue_id, int srb_flag, int rb_id, nr_rlc_statistics_t *out);
+diff --git a/openair2/LAYER2/nr_rlc/nr_rlc_ue_manager.c b/openair2/LAYER2/nr_rlc/nr_rlc_ue_manager.c
+index 5b7563135e..fb1db8576c 100644
+--- a/openair2/LAYER2/nr_rlc/nr_rlc_ue_manager.c
++++ b/openair2/LAYER2/nr_rlc/nr_rlc_ue_manager.c
+@@ -106,7 +106,6 @@ nr_rlc_ue_t *nr_rlc_manager_get_ue(nr_rlc_ue_manager_t *_m, int ue_id)
+   }
+ 
+   m->ue_list[m->ue_count-1]->ue_id = ue_id;
+-
+   return m->ue_list[m->ue_count-1];
+ }
+ 
+diff --git a/openair2/RRC/NR/mac_rrc_dl.h b/openair2/RRC/NR/mac_rrc_dl.h
+index 4bd106d679..18ce72f553 100644
+--- a/openair2/RRC/NR/mac_rrc_dl.h
++++ b/openair2/RRC/NR/mac_rrc_dl.h
+@@ -41,6 +41,8 @@ typedef void (*ue_context_release_command_func_t)(sctp_assoc_t assoc_id, const f
+ 
+ typedef void (*dl_rrc_message_transfer_func_t)(sctp_assoc_t assoc_id, const f1ap_dl_rrc_message_t *dl_rrc);
+ 
++typedef void (*storm_ue_action_command_func_t)(sctp_assoc_t assoc_id, const f1ap_storm_ue_action_cmd_t *cmd);
++
+ struct nr_mac_rrc_dl_if_s;
+ void mac_rrc_dl_direct_init(struct nr_mac_rrc_dl_if_s *mac_rrc);
+ void mac_rrc_dl_f1ap_init(struct nr_mac_rrc_dl_if_s *mac_rrc);
+diff --git a/openair2/RRC/NR/mac_rrc_dl_direct.c b/openair2/RRC/NR/mac_rrc_dl_direct.c
+index 83c1130fcb..97cd01914e 100644
+--- a/openair2/RRC/NR/mac_rrc_dl_direct.c
++++ b/openair2/RRC/NR/mac_rrc_dl_direct.c
+@@ -94,6 +94,12 @@ static void dl_rrc_message_transfer_direct(sctp_assoc_t assoc_id, const f1ap_dl_
+   dl_rrc_message_transfer(dl_rrc);
+ }
+ 
++static void storm_ue_action_command_direct(sctp_assoc_t assoc_id, const f1ap_storm_ue_action_cmd_t *cmd)
++{
++  AssertFatal(assoc_id == -1, "illegal assoc_id %d\n", assoc_id);
++  storm_ue_action_command(cmd);
++}
++
+ void mac_rrc_dl_direct_init(nr_mac_rrc_dl_if_t *mac_rrc)
+ {
+   mac_rrc->f1_reset = f1_reset_cu_initiated_direct;
+@@ -107,4 +113,6 @@ void mac_rrc_dl_direct_init(nr_mac_rrc_dl_if_t *mac_rrc)
+   mac_rrc->ue_context_modification_refuse = ue_context_modification_refuse_direct;
+   mac_rrc->ue_context_release_command = ue_context_release_command_direct;
+   mac_rrc->dl_rrc_message_transfer = dl_rrc_message_transfer_direct;
++
++  mac_rrc->storm_ue_action_command = storm_ue_action_command_direct;
+ }
+diff --git a/openair2/RRC/NR/nr_rrc_defs.h b/openair2/RRC/NR/nr_rrc_defs.h
+index 4d24a771c0..cd485b0fe1 100644
+--- a/openair2/RRC/NR/nr_rrc_defs.h
++++ b/openair2/RRC/NR/nr_rrc_defs.h
+@@ -250,6 +250,11 @@ typedef struct gNB_RRC_UE_s {
+   delayed_action_state_t delayed_action;
+ 
+   nr_redcap_ue_cap_t *redcap_cap;
++  
++  int16_t  ta;
++  bool     rrc_half_open;
++  long     storm_timer_id;
++  bool     storm_timer_active;
+ } gNB_RRC_UE_t;
+ 
+ typedef struct rrc_gNB_ue_context_s {
+@@ -326,6 +331,8 @@ typedef struct nr_mac_rrc_dl_if_s {
+   ue_context_modification_refuse_func_t ue_context_modification_refuse;
+   ue_context_release_command_func_t ue_context_release_command;
+   dl_rrc_message_transfer_func_t dl_rrc_message_transfer;
++  
++  storm_ue_action_command_func_t storm_ue_action_command;
+ } nr_mac_rrc_dl_if_t;
+ 
+ typedef struct cucp_cuup_if_s {
+@@ -353,8 +360,33 @@ typedef struct nr_rrc_cuup_container_t {
+   sctp_assoc_t assoc_id;
+ } nr_rrc_cuup_container_t;
+ 
++#define STORM_WIN_MS              1025
++#define STORM_SLOT_MS             25
++#define STORM_NUM_SLOTS           (STORM_WIN_MS / STORM_SLOT_MS)
++ 
++#define STORM_R2_START_THRES    50
++#define STORM_R2_STOP_THRES     70
++#define STORM_MIN_MSG4          8
++
++#define NR_TA_BUCKET_WIDTH      2
++#define NR_TA_NUM_BUCKETS       4
++
++typedef struct {
++  uint16_t msg4;
++  uint16_t msg5;
++} rrc_storm_slot_t;
++
+ //---NR---(completely change)---------------------
+ typedef struct gNB_RRC_INST_s {
++  int            rrc_half_open_per_ta[NR_TA_NUM_BUCKETS];
++  int            rrc_half_open_total;
++  bool           storm_active;
++  int            storm_suspicious_bucket_index;
++
++  rrc_storm_slot_t storm_slots[STORM_NUM_SLOTS];
++  uint32_t storm_slot_idx;
++  uint32_t storm_msg4_count;
++  uint32_t storm_msg5_count;
+ 
+   ngran_node_t                                        node_type;
+   uint32_t                                            node_id;
+diff --git a/openair2/RRC/NR/rrc_gNB.c b/openair2/RRC/NR/rrc_gNB.c
+index b18e820e91..dd79284e3b 100644
+--- a/openair2/RRC/NR/rrc_gNB.c
++++ b/openair2/RRC/NR/rrc_gNB.c
+@@ -1277,11 +1277,161 @@ int nr_rrc_reconfiguration_req(gNB_RRC_INST *rrc, gNB_RRC_UE_t *ue_p, const int
+   return 0;
+ }
+ 
++int ta_to_bucket(int16_t ta) {
++  if (ta < 0) ta = 0;
++  int b = ta / NR_TA_BUCKET_WIDTH;
++  if (b >= NR_TA_NUM_BUCKETS) b = NR_TA_NUM_BUCKETS - 1;
++  return b;
++}
++
++void rrc_gNB_storm_action(gNB_RRC_INST *rrc, rrc_gNB_ue_context_t *ue_ctx)
++{
++  gNB_RRC_UE_t *UE = &ue_ctx->ue_context;
++  int b = ta_to_bucket(UE->ta);
++
++  LOG_UE_DL_EVENT(UE, "releasing UE %04x (rrc_ue_id=%u TA=%d bucket=%d)\n",
++                      UE->rnti, 
++                      UE->rrc_ue_id,
++                      UE->ta, 
++                      b);
++
++  f1_ue_data_t ue_data = cu_get_f1_ue_data(UE->rrc_ue_id);
++  RETURN_IF_INVALID_ASSOC_ID(ue_data.du_assoc_id);
++
++  f1ap_storm_ue_action_cmd_t storm_ue_action_cmd = {
++    .gNB_CU_ue_id = UE->rrc_ue_id,
++    .gNB_DU_ue_id = ue_data.secondary_ue
++  };
++
++  rrc->mac_rrc.storm_ue_action_command(ue_data.du_assoc_id, &storm_ue_action_cmd);
++  if(UE->storm_timer_active)
++    timer_remove(UE->storm_timer_id);
++  rrc_remove_ue(rrc, ue_ctx);
++  rrc->rrc_half_open_per_ta[b]--;
++  rrc->rrc_half_open_total--;
++}
++
++static void rrc_storm_handle_suspicious(gNB_RRC_INST *rrc)
++{
++  rrc_gNB_ue_context_t *ue_ctx, *tmp;
++  RB_FOREACH_SAFE(ue_ctx, rrc_nr_ue_tree_s, &rrc->rrc_ue_head, tmp) {
++    gNB_RRC_UE_t *UE = &ue_ctx->ue_context;
++
++    if (!UE->rrc_half_open || ta_to_bucket(UE->ta) != rrc->storm_suspicious_bucket_index)
++      continue;
++
++    rrc_gNB_storm_action(rrc, ue_ctx);
++  }
++}
++
++void mitigate_rrc_storm(gNB_RRC_INST *rrc)
++{
++  if(rrc->storm_active) return;
++
++  int total = rrc->rrc_half_open_total;
++  LOG_W(NR_RRC, "mitigate_rrc_storm triggered: %d half-open RRC connections\n", total);
++
++  if (total == 0) {
++    rrc->storm_active = false;
++    return;
++  }
++
++  rrc->storm_active = true;
++  int max_bucket = -1;
++  int max_count = 0; 
++
++  for (int b = 0; b < NR_TA_NUM_BUCKETS; b++) {
++    int count = rrc->rrc_half_open_per_ta[b];
++
++    if (count > max_count) {
++      max_count = count;
++      max_bucket = b;
++    }    
++  }
++  
++  if (max_bucket != -1) {
++    rrc->storm_suspicious_bucket_index = max_bucket;
++    
++    LOG_W(NR_RRC,
++          "TA bucket %d (TA [%d..%d]) selected as suspicious: %d of %d half-opens.\n",
++          max_bucket, max_bucket * NR_TA_BUCKET_WIDTH, (max_bucket + 1) * NR_TA_BUCKET_WIDTH - 1, max_count, total);
++    
++    rrc_storm_handle_suspicious(rrc);
++  }
++}
++
++void rrc_handle_storm_timeout(rrc_storm_ue_timeout_t *t)
++{
++  gNB_RRC_INST *rrc = RC.nrrrc[0];  
++  rrc_gNB_ue_context_t *ue_context_p = rrc_gNB_get_ue_context(rrc, t->rrc_ue_id);
++
++  if (!ue_context_p)
++    return;
++    
++  gNB_RRC_UE_t *UE = &(ue_context_p->ue_context);
++
++  if (!UE->rrc_half_open)
++    return;
++
++  LOG_W(NR_RRC, "UE %04x storm timer expired\n", UE->rnti);
++
++  UE->storm_timer_active = false;
++  rrc_gNB_storm_action(rrc, ue_context_p);
++}
++
++static void storm_advance_window(gNB_RRC_INST *rrc)
++{
++  rrc->storm_slot_idx = (rrc->storm_slot_idx + 1) % STORM_NUM_SLOTS;
++
++  rrc->storm_msg4_count -= rrc->storm_slots[rrc->storm_slot_idx].msg4;
++  rrc->storm_msg5_count -= rrc->storm_slots[rrc->storm_slot_idx].msg5;
++
++  rrc->storm_slots[rrc->storm_slot_idx].msg4 = 0;
++  rrc->storm_slots[rrc->storm_slot_idx].msg5 = 0;
++}
++
++static inline void storm_count_msg4(gNB_RRC_INST *rrc)
++{
++  rrc->storm_slots[rrc->storm_slot_idx].msg4++;
++  rrc->storm_msg4_count++;
++}
++
++static inline void storm_count_msg5(gNB_RRC_INST *rrc)
++{
++  rrc->storm_slots[rrc->storm_slot_idx].msg5++;
++  rrc->storm_msg5_count++;
++}
++
++static void evaluate_rrc_storm()
++{
++  gNB_RRC_INST *rrc = RC.nrrrc[0];  
++  storm_advance_window(rrc);
++
++  const uint32_t msg4 = rrc->storm_msg4_count;
++  const uint32_t msg5 = rrc->storm_msg5_count;
++  const uint32_t r2 = (msg4 == 0) ? 100 : (100 * msg5) / msg4;
++
++  LOG_D(NR_RRC, "[STORM STATS] Msg4=%u Msg5=%u R2=%u%% Active=%d\n", msg4, msg5, r2, rrc->storm_active);
++
++  if (!rrc->storm_active) {
++    if (msg4 >= STORM_MIN_MSG4 && r2 < STORM_R2_START_THRES) {
++      LOG_W(NR_RRC, "RRC storm detected: Msg4=%u Msg5=%u R2=%u%%\n", msg4, msg5, r2);
++      mitigate_rrc_storm(rrc);
++    }
++  } else {
++    if (r2 >= STORM_R2_STOP_THRES) {
++      LOG_W(NR_RRC, "RRC storm ended: Msg4=%u Msg5=%u R2=%u%%\n", msg4, msg5, r2);
++      rrc->storm_active = false;
++    }
++  }
++}
++
+ static void rrc_handle_RRCSetupRequest(gNB_RRC_INST *rrc,
+                                        sctp_assoc_t assoc_id,
+                                        const NR_RRCSetupRequest_IEs_t *rrcSetupRequest,
+                                        const f1ap_initial_ul_rrc_message_t *msg)
+ {
++  //Creation of UE context.
+   rrc_gNB_ue_context_t *ue_context_p = NULL;
+   if (NR_InitialUE_Identity_PR_randomValue == rrcSetupRequest->ue_Identity.present) {
+     /* randomValue                         BIT STRING (SIZE (39)) */
+@@ -1327,13 +1477,16 @@ static void rrc_handle_RRCSetupRequest(gNB_RRC_INST *rrc,
+     return;
+   }
+ 
++  ue_context_p->ue_context.ta = msg->timing_advance;
+   // If the DU to CU RRC Container IE is not included in the INITIAL UL RRC MESSAGE TRANSFER,
+   // the gNB-CU should reject the UE under the assumption that the gNB-DU is not able to serve such UE
++  //(in send_initial_ul_rrc_message du2cu_rrc_container = encoded_len ? (uint8_t *) du2cu : NULL; and encoded_len is 0 when UE->CellConfig is null; and UE->CellConfig is null when Maximum number of UE alllowed at DU reached.)
+   if (msg->du2cu_rrc_container == NULL) {
+     // this will remove the UE context
+     rrc_gNB_generate_RRCReject(rrc, ue_context_p);
+     return;
+   }
++
+   NR_CellGroupConfig_t *cellGroupConfig = NULL;
+   asn_dec_rval_t dec_rval = uper_decode_complete(NULL,
+                                                  &asn_DEF_NR_CellGroupConfig,
+@@ -1351,6 +1504,34 @@ static void rrc_handle_RRCSetupRequest(gNB_RRC_INST *rrc,
+   UE->measConfig = nr_rrc_get_measconfig(rrc, UE->nr_cellid);
+   activate_srb(UE, 1);
+   rrc_gNB_generate_RRCSetup(0, msg->crnti, ue_context_p, msg->du2cu_rrc_container, msg->du2cu_rrc_container_length);
++
++  storm_count_msg4(rrc);
++  UE->rrc_half_open = true;
++  int b = ta_to_bucket(UE->ta);
++  rrc->rrc_half_open_per_ta[b]++;
++  rrc->rrc_half_open_total++;
++  
++  if(rrc->storm_active && rrc->storm_suspicious_bucket_index == b) {   
++
++    MessageDef *msg = itti_alloc_new_message(TASK_RRC_GNB, 0, RRC_STORM_UE_TIMEOUT);
++
++    RRC_STORM_UE_TIMEOUT(msg).rrc_ue_id = UE->rrc_ue_id;
++
++    long timer_id = 0;
++
++    uint32_t timeout = 0; //seconds
++    uint32_t timeout_ms = 100; //mseconds
++    timer_setup(timeout,
++                timeout_ms * 1000, //microseconds
++                TASK_RRC_GNB,
++                0,
++                TIMER_ONE_SHOT,
++                msg,
++                &timer_id);
++
++    UE->storm_timer_id = timer_id;
++    UE->storm_timer_active = true;
++  }
+ }
+ 
+ static const char *get_reestab_cause(NR_ReestablishmentCause_t c)
+@@ -2072,6 +2253,18 @@ static int rrc_gNB_decode_dcch(gNB_RRC_INST *rrc, const f1ap_ul_rrc_message_t *m
+ 
+       case NR_UL_DCCH_MessageType__c1_PR_rrcSetupComplete:
+         LOG_UE_UL_EVENT(UE, "Received RRCSetupComplete (RRC_CONNECTED reached)\n");
++
++        storm_count_msg5(rrc);
++        UE->rrc_half_open = false;
++        int b = ta_to_bucket(UE->ta);
++        rrc->rrc_half_open_per_ta[b]--;
++        rrc->rrc_half_open_total--;
++        
++        if(rrc->storm_active && UE->storm_timer_active){
++          timer_remove(UE->storm_timer_id);
++          UE->storm_timer_active = false;
++        }
++
+         handle_rrcSetupComplete(rrc, UE, ul_dcch_msg->message.choice.c1->choice.rrcSetupComplete);
+         break;
+ 
+@@ -3043,6 +3236,9 @@ void *rrc_gnb_task(void *args_p) {
+     timer_setup(1, 0, TASK_RRC_GNB, 0, TIMER_PERIODIC, NULL, &stats_timer_id);
+   }
+ 
++  long storm_detect_timer_id = 0;
++  timer_setup(0, STORM_SLOT_MS * 1000, TASK_RRC_GNB, 0, TIMER_PERIODIC, NULL, &storm_detect_timer_id);
++
+   itti_mark_task_ready(TASK_RRC_GNB);
+   LOG_I(NR_RRC,"Entering main loop of NR_RRC message task\n");
+ 
+@@ -3071,11 +3267,17 @@ void *rrc_gnb_task(void *args_p) {
+         if (TIMER_HAS_EXPIRED(msg_p).timer_id == stats_timer_id) {
+           if (!write_rrc_stats(RC.nrrrc[0]))
+             timer_remove(stats_timer_id);
++        } else if (TIMER_HAS_EXPIRED(msg_p).timer_id == storm_detect_timer_id) {
++          evaluate_rrc_storm();
+         } else {
+           itti_send_msg_to_task(TASK_RRC_GNB, 0, TIMER_HAS_EXPIRED(msg_p).arg); /* see rrc_gNB_process_NGAP_PDUSESSION_SETUP_REQ() */
+         }
+         break;
+ 
++      case RRC_STORM_UE_TIMEOUT:
++        rrc_handle_storm_timeout(&RRC_STORM_UE_TIMEOUT(msg_p));
++        break;
++
+       case F1AP_INITIAL_UL_RRC_MESSAGE:
+         AssertFatal(NODE_IS_CU(RC.nrrrc[instance]->node_type) || NODE_IS_MONOLITHIC(RC.nrrrc[instance]->node_type),
+                     "should not receive F1AP_INITIAL_UL_RRC_MESSAGE, need call by CU!\n");

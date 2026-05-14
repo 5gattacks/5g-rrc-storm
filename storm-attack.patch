@@ -1,0 +1,305 @@
+diff --git a/openair1/SCHED_NR/nr_prach_procedures.c b/openair1/SCHED_NR/nr_prach_procedures.c
+index d5d6a8860e..c8682aabcd 100644
+--- a/openair1/SCHED_NR/nr_prach_procedures.c
++++ b/openair1/SCHED_NR/nr_prach_procedures.c
+@@ -36,6 +36,7 @@
+ #include "nfapi_pnf.h"
+ #include "common/utils/LOG/log.h"
+ #include "common/utils/LOG/vcd_signal_dumper.h"
++#include "common/utils/time_stat.h"
+ #include "assertions.h"
+ #include <time.h>
+ 
+@@ -85,9 +86,11 @@ void L1_nr_prach_procedures(PHY_VARS_gNB *gNB, int frame, int slot, nfapi_nr_rac
+     if ((gNB->prach_energy_counter == NUM_PRACH_RX_FOR_NOISE_ESTIMATE)
+         && (res.max_preamble_energy > gNB->measurements.prach_I0 + gNB->prach_thres)
+         && (rach_ind->number_of_pdus < MAX_NUM_NR_RX_RACH_PDUS)) {
++      
++      uint64_t now_us = time_average_now();
+       LOG_A(NR_PHY,
+             "[RAPROC] %d.%d Initiating RA procedure with preamble %d, energy %d.%d dB (I0 %d, thres %d), delay %d start symbol "
+-            "%u freq index %u\n",
++            "%u freq index %u [time_us=%lu].\n",
+             frame,
+             prach_start_slot,
+             res.max_preamble,
+@@ -97,7 +100,8 @@ void L1_nr_prach_procedures(PHY_VARS_gNB *gNB, int frame, int slot, nfapi_nr_rac
+             gNB->prach_thres,
+             res.max_preamble_delay,
+             prachStartSymbol,
+-            prach_pdu->num_ra);
++            prach_pdu->num_ra,
++            now_us);
+ 
+       T(T_ENB_PHY_INITIATE_RA_PROCEDURE,
+         T_INT(gNB->Mod_id),
+diff --git a/openair2/LAYER2/NR_MAC_UE/nr_ra_procedures.c b/openair2/LAYER2/NR_MAC_UE/nr_ra_procedures.c
+index 0dae34eda7..b33a9dd932 100644
+--- a/openair2/LAYER2/NR_MAC_UE/nr_ra_procedures.c
++++ b/openair2/LAYER2/NR_MAC_UE/nr_ra_procedures.c
+@@ -1052,6 +1052,11 @@ void nr_Msg3_transmitted(NR_UE_MAC_INST_t *mac, uint8_t CC_id, frame_t frameP, s
+   nr_timer_start(&ra->contention_resolution_timer);
+ 
+   ra->ra_state = nrRA_WAIT_CONTENTION_RESOLUTION;
++
++  if (ra->Msg3_buffer != NULL) {
++    free(ra->Msg3_buffer);
++    ra->Msg3_buffer = NULL;
++  }
+ }
+ 
+ static uint8_t *fill_msg3_crnti_pdu(RA_config_t *ra, uint8_t *pdu, uint16_t crnti)
+diff --git a/openair2/LAYER2/NR_MAC_UE/nr_ue_scheduler.c b/openair2/LAYER2/NR_MAC_UE/nr_ue_scheduler.c
+index bd9ea09041..a4028dfdcb 100644
+--- a/openair2/LAYER2/NR_MAC_UE/nr_ue_scheduler.c
++++ b/openair2/LAYER2/NR_MAC_UE/nr_ue_scheduler.c
+@@ -1721,6 +1721,7 @@ static void nr_ue_pucch_scheduler(NR_UE_MAC_INST_t *mac, frame_t frame, int slot
+ 
+   if (mac->ra.ra_pucch) {
+     // scheduling PUCCH prepared in advance for MSG4
++    LOG_W(NR_MAC, "nr_ue_pucch_scheduler\n");
+     RA_PUCCH_SCHED_t *ra_pucch = mac->ra.ra_pucch;
+     if (ra_pucch->sched_frame == frame && ra_pucch->sched_slot == slot) {
+       pucch[0] = ra_pucch->pucch_sched;
+diff --git a/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_RA.c b/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_RA.c
+index 8478df8916..28ee1b930e 100644
+--- a/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_RA.c
++++ b/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_RA.c
+@@ -769,7 +769,7 @@ static void start_ra_contention_resolution_timer(NR_RA_t *ra, const long ra_Cont
+   // Value sf8 corresponds to 8 subframes, value sf16 corresponds to 16 subframes, and so on.
+   // We add 2 * K2 because the timer runs from Msg2 transmission till Msg4 ACK reception
+   ra->contention_resolution_timer = ((((int)ra_ContentionResolutionTimer + 1) * 8) << scs) + 2 * K2;
+-  LOG_D(NR_MAC,
++  LOG_E(NR_MAC,
+         "Starting RA Contention Resolution timer with %d ms + 2 * %d K2 (%d slots) duration\n",
+         ((int)ra_ContentionResolutionTimer + 1) * 8,
+         K2,
+@@ -2151,7 +2151,7 @@ void nr_schedule_RA(module_id_t module_idP,
+       if (ra->ra_type == RA_4_STEP && ra->ra_state > nrRA_WAIT_Msg3) {
+         ra->contention_resolution_timer--;
+         if (ra->contention_resolution_timer == 0) {
+-          LOG_W(NR_MAC, "(%d.%d) RA Contention Resolution timer expired for UE 0x%04x, RA procedure failed...\n", frameP, slotP, UE->rnti);
++          LOG_W(NR_MAC, "(%d.%d) RA Contention Resolution timer expired for UE 0x%04x, RA procedure failed... ra->ra_state: %d\n", frameP, slotP, UE->rnti, ra->ra_state);
+           bool requested = false;
+           if (UE->CellGroup) // request if we did not reject the UE
+             requested = nr_mac_request_release_ue(mac, UE->rnti);
+diff --git a/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_primitives.c b/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_primitives.c
+index 128f2db336..03be9c0550 100644
+--- a/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_primitives.c
++++ b/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_primitives.c
+@@ -52,7 +52,7 @@
+ #include "uper_decoder.h"
+ 
+ #include "SIMULATION/TOOLS/sim.h" // for taus
+-
++#include "common/utils/time_stat.h"
+ #define ENABLE_MAC_PAYLOAD_DEBUG
+ #define DEBUG_gNB_SCHEDULER 1
+ 
+@@ -3797,16 +3797,19 @@ bool prepare_initial_ul_rrc_message(gNB_MAC_INST *mac, NR_UE_info_t *UE)
+   /* activate SRB0 */
+   if (!nr_rlc_activate_srb0(UE->rnti, UE, send_initial_ul_rrc_message))
+     return false;
++  
+ 
+   if (UE->uid >= MAX_MOBILES_PER_GNB) {
+     // verifying if any UE left in the meantime and it is possible to get a valid UID
++    LOG_W(NR_MAC, "Before uid_linear_allocator_free: UID: %d, MAX_MOBILES_PER_GNB %d\n", UE->uid, MAX_MOBILES_PER_GNB);
+     uid_linear_allocator_free(&mac->UE_info.uid_allocator, UE->uid);
+     UE->uid = uid_linear_allocator_new(&mac->UE_info.uid_allocator);
+     if (UE->uid >= MAX_MOBILES_PER_GNB) {
+       // if the UE list is full, we should reject the UE with an RRC reject message
+       // to signal the upper layers to send a reject we send an empty CellGroup information element
+       UE->CellGroup = NULL;
+-      LOG_W(NR_MAC, "Maximum number of UE alllowed at DU reached. Cannot serve UE %04x", UE->rnti);
++      uint64_t now_us = time_average_now();
++      LOG_W(NR_MAC, "Maximum number of UE alllowed at DU reached [time_us=%lu]. Cannot serve UE %04x", now_us, UE->rnti);
+       return true;
+     }
+   }
+@@ -3858,8 +3861,8 @@ bool nr_mac_ue_is_active(const NR_UE_info_t *ue)
+   return true;
+ }
+ 
+-#define UL_FAILURE_REQ_GRACE 10000
+-#define UL_FAILURE_TIMEOUT 30000
++#define UL_FAILURE_REQ_GRACE 1000
++#define UL_FAILURE_TIMEOUT 5000
+ void nr_mac_trigger_ul_failure(NR_UE_sched_ctrl_t *sched_ctrl, NR_SubcarrierSpacing_t subcarrier_spacing)
+ {
+   if (sched_ctrl->ul_failure) {
+@@ -3909,7 +3912,8 @@ bool nr_mac_check_ul_failure(gNB_MAC_INST *nrmac, int rnti, NR_UE_sched_ctrl_t *
+    * wait for a UE release command from upper layers), and UE is automatically
+    * released when no answer after UL_FAILURE_REQ_GRACE */
+   if (sched_ctrl->ul_failure_timer == UL_FAILURE_REQ_GRACE) {
+-    LOG_W(MAC, "UE %04x: request release after UL failure timer expiry\n", rnti);
++    uint64_t now_us = time_average_now();
++    LOG_W(MAC, "UE %04x: request release after UL failure timer expiry [time_us=%lu]\n", rnti, now_us);
+     bool requested = nr_mac_request_release_ue(nrmac, rnti);
+     if (!requested)
+       sched_ctrl->ul_failure_timer = 0; /* force expiry */
+diff --git a/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_ulsch.c b/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_ulsch.c
+index 3f546d41b4..e3b8568283 100644
+--- a/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_ulsch.c
++++ b/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_ulsch.c
+@@ -459,7 +459,11 @@ static int nr_process_mac_pdu(instance_t module_idP,
+           LOG_I(MAC, "UE with RNTI %04x is RedCap\n", UE->rnti);
+           UE->is_redcap = true;
+         }
+-
++        LOG_W(NR_MAC,
++          "prepare_initial_ul_rrc_message in %d.%d for RNTI %04X\n",
++          frameP,
++          slot,
++          UE->rnti);
+         if (prepare_initial_ul_rrc_message(RC.nrmac[module_idP], UE)) {
+           nr_mac_rlc_data_ind(module_idP, UE->rnti, true, 0, (char *)(pduP + mac_subheader_len), mac_len);
+         } else {
+diff --git a/openair2/LAYER2/NR_MAC_gNB/nr_radio_config.c b/openair2/LAYER2/NR_MAC_gNB/nr_radio_config.c
+index dff2f2b663..f9dd474d87 100644
+--- a/openair2/LAYER2/NR_MAC_gNB/nr_radio_config.c
++++ b/openair2/LAYER2/NR_MAC_gNB/nr_radio_config.c
+@@ -228,6 +228,17 @@ static int get_nb_pucch2_per_slot(const NR_ServingCellConfigCommon_t *scc, int b
+   // in current implementation we need (nb_pucch2 * PUCCH2_SIZE) prbs for PUCCH2
+   // and MAX_MOBILES_PER_GNB prbs for PUCCH1
+   // checked for validity in verify_radio_configuration
++  int prbs_needed = MAX_MOBILES_PER_GNB + (nb_pucch2 * PUCCH2_SIZE);
++
++  LOG_I(NR_MAC,
++        "PUCCH dimensioning: MAX_MOBILES_PER_GNB=%d, nb_pucch2=%d, PUCCH2_SIZE=%d => "
++        "PRBs_needed=%d, UL_BWP_PRBs=%d\n",
++        MAX_MOBILES_PER_GNB,
++        nb_pucch2,
++        PUCCH2_SIZE,
++        prbs_needed,
++        bwp_size);
++        
+   AssertFatal((nb_pucch2 * PUCCH2_SIZE) + MAX_MOBILES_PER_GNB <= bwp_size,
+               "Cannot allocate all required PUCCH resources for max number of %d UEs in BWP with %d PRBs\n",
+               MAX_MOBILES_PER_GNB, bwp_size);
+diff --git a/openair2/RRC/NR_UE/rrc_UE.c b/openair2/RRC/NR_UE/rrc_UE.c
+index 24088749a5..a248206204 100644
+--- a/openair2/RRC/NR_UE/rrc_UE.c
++++ b/openair2/RRC/NR_UE/rrc_UE.c
+@@ -381,7 +381,7 @@ static void nr_decode_SI(NR_UE_RRC_SI_INFO *SI_info, NR_SystemInformation_t *si,
+ 
+ static void nr_rrc_ue_prepare_RRCSetupRequest(NR_UE_RRC_INST_t *rrc)
+ {
+-  LOG_D(NR_RRC, "Generation of RRCSetupRequest\n");
++  LOG_E(NR_RRC, "Generation of RRCSetupRequest\n");
+   uint8_t rv[6];
+   // Get RRCConnectionRequest, fill random for now
+   // Generate random byte stream for contention resolution
+@@ -1966,6 +1966,8 @@ static int8_t nr_rrc_ue_decode_ccch(NR_UE_RRC_INST_t *rrc, const NRRrcMacCcchDat
+   NR_DL_CCCH_Message_t *dl_ccch_msg = NULL;
+   asn_dec_rval_t dec_rval;
+   int rval=0;
++  NR_UE_Timers_Constants_t *tac = &rrc->timers_and_constants;
++
+   VCD_SIGNAL_DUMPER_DUMP_FUNCTION_BY_NAME(VCD_SIGNAL_DUMPER_FUNCTIONS_UE_DECODE_CCCH, VCD_FUNCTION_IN);
+   LOG_D(RRC, "[NR UE%ld] Decoding DL-CCCH message (%d bytes), State %d\n", rrc->ue_id, ind->sdu_size, rrc->nrRrcState);
+ 
+@@ -1989,13 +1991,15 @@ static int8_t nr_rrc_ue_decode_ccch(NR_UE_RRC_INST_t *rrc, const NRRrcMacCcchDat
+ 
+        case NR_DL_CCCH_MessageType__c1_PR_rrcReject:
+          LOG_W(NR_RRC, "[UE%ld] Logical Channel DL-CCCH (SRB0), Received RRCReject \n", rrc->ue_id);
+-         nr_rrc_process_rrcreject(rrc, dl_ccch_msg->message.choice.c1->choice.rrcReject);
++         nr_timer_stop(&tac->T300);
++         handle_t300_expiry(rrc);
+          rval = 0;
+          break;
+ 
+        case NR_DL_CCCH_MessageType__c1_PR_rrcSetup:
+-         LOG_I(NR_RRC, "[UE%ld][RAPROC] Logical Channel DL-CCCH (SRB0), Received NR_RRCSetup\n", rrc->ue_id);
+-         nr_rrc_process_rrcsetup(rrc, dl_ccch_msg->message.choice.c1->choice.rrcSetup);
++         LOG_E(NR_RRC, "[UE%ld][RAPROC] Logical Channel DL-CCCH (SRB0), Received NR_RRCSetup\n", rrc->ue_id);
++         nr_timer_stop(&tac->T300);
++         nr_timer_start(&tac->attack_rach_timer);
+          rval = 0;
+          break;
+ 
+@@ -2924,6 +2928,7 @@ void nr_rrc_going_to_IDLE(NR_UE_RRC_INST_t *rrc,
+   }
+   // Stop all the timers except T302, T320 and T325
+   nr_timer_stop(&tac->T300);
++  nr_timer_stop(&tac->attack_rach_timer);
+   nr_timer_stop(&tac->T301);
+   nr_timer_stop(&tac->T304);
+   nr_timer_stop(&tac->T310);
+@@ -3025,6 +3030,7 @@ void handle_302_expired_stopped(NR_UE_RRC_INST_t *rrc)
+ 
+ void handle_t300_expiry(NR_UE_RRC_INST_t *rrc)
+ {
++  LOG_W(NR_RRC, "handle_t300_expiry\n");
+   rrc->ra_trigger = RRC_CONNECTION_SETUP;
+   nr_rrc_ue_prepare_RRCSetupRequest(rrc);
+ 
+diff --git a/openair2/RRC/NR_UE/rrc_defs.h b/openair2/RRC/NR_UE/rrc_defs.h
+index ae8837bff2..1129c7e5cd 100644
+--- a/openair2/RRC/NR_UE/rrc_defs.h
++++ b/openair2/RRC/NR_UE/rrc_defs.h
+@@ -163,6 +163,7 @@ typedef struct UE_RRC_SI_INFO_NR_s {
+ typedef struct NR_UE_Timers_Constants_s {
+   // timers
+   NR_timer_t T300;
++  NR_timer_t attack_rach_timer;
+   NR_timer_t T301;
+   NR_timer_t T302;
+   NR_timer_t T304;
+diff --git a/openair2/RRC/NR_UE/rrc_timers_and_constants.c b/openair2/RRC/NR_UE/rrc_timers_and_constants.c
+index 133ffb8d8e..5518ec7ddd 100644
+--- a/openair2/RRC/NR_UE/rrc_timers_and_constants.c
++++ b/openair2/RRC/NR_UE/rrc_timers_and_constants.c
+@@ -166,6 +166,12 @@ void nr_rrc_handle_timers(NR_UE_RRC_INST_t *rrc)
+     handle_t300_expiry(rrc);
+   }
+ 
++  bool attack_rach_timer_expired = nr_timer_tick(&timers->attack_rach_timer);
++
++  if (attack_rach_timer_expired) {
++    handle_t300_expiry(rrc);
++  }
++
+   bool t301_expired = nr_timer_tick(&timers->T301);
+   // Upon T301 expiry, the UE shall perform the actions upon going to RRC_IDLE
+   // with release cause 'RRC connection failure'
+@@ -179,7 +185,7 @@ void nr_rrc_handle_timers(NR_UE_RRC_INST_t *rrc)
+   // consider the barring for this Access Category to be alleviated
+   if (t302_expired) {
+     LOG_W(NR_RRC, "[UE %ld] Timer T302 expired! Access barring alleviated!\n", rrc->ue_id);
+-    handle_302_expired_stopped(rrc);
++    //handle_302_expired_stopped(rrc);
+   }
+ 
+   bool t304_expired = nr_timer_tick(&timers->T304);
+@@ -433,6 +439,9 @@ void nr_rrc_set_sib1_timers_and_constants(NR_UE_Timers_Constants_t *tac, NR_SIB1
+         AssertFatal(false, "Invalid T300 %ld\n", sib1->ue_TimersAndConstants->t300);
+     }
+     nr_timer_setup(&tac->T300, k, 10); // 10ms step
++    
++    nr_timer_setup(&tac->attack_rach_timer, 10, 10);
++
+     switch (sib1->ue_TimersAndConstants->t319) {
+       case NR_UE_TimersAndConstants__t319_ms100 :
+         k = 100;
+diff --git a/targets/PROJECTS/GENERIC-NR-5GC/CONF/gnb.sa.band78.fr1.106PRB.usrpb210.conf b/targets/PROJECTS/GENERIC-NR-5GC/CONF/gnb.sa.band78.fr1.106PRB.usrpb210.conf
+index 7f750d7259..798b9763aa 100644
+--- a/targets/PROJECTS/GENERIC-NR-5GC/CONF/gnb.sa.band78.fr1.106PRB.usrpb210.conf
++++ b/targets/PROJECTS/GENERIC-NR-5GC/CONF/gnb.sa.band78.fr1.106PRB.usrpb210.conf
+@@ -25,7 +25,7 @@ gNBs =
+     {
+  #spCellConfigCommon
+ 
+-      physCellId                                                    = 0;
++      physCellId                                                    = 2;
+ 
+ #  downlinkConfigCommon
+     #frequencyInfoDL
+@@ -191,6 +191,7 @@ L1s = (
+ RUs = (
+ {
+   local_rf       = "yes"
++  sdr_addrs = "serial=8002816" 
+   nb_tx          = 1
+   nb_rx          = 1
+   att_tx         = 12;

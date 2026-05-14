@@ -1,0 +1,28 @@
+# Node dependencies
+node_modules/
+**/node_modules/
+nms/modules/
+nms/node_modules/
+nms/backend/node_modules/
+nms/frontend/node_modules/
+
+# Build outputs
+dist/
+build/
+coverage/
+
+# Logs
+*.log
+logs/
+gnb.logs
+amf.logs
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/

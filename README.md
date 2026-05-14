@@ -8,9 +8,6 @@ The attack and mitigation are both based on OpenAirInterface commit:
 92980ceb725a94dbfe97c509d16f1313eee083e0
 ```
 
-The mitigation keeps the folder name `openairinterface5g` because the NMS is shared with the previous SIB8 work, where the same folder name was also used.
-
-
 ## 1. Clone the repository
 
 ```bash

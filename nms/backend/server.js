@@ -273,22 +273,18 @@ function parseGnbRuntimeCoreFromHead(text) {
 
   if (!text) return out;
 
-  // TAC
   const tac = text.match(/\bTAC\s+(\d+)\b/);
   if (tac) out.tac = Number(tac[1]);
 
-  // band
   const dlBand =
     text.match(/DL frequency\s+\d+\s*:\s*band\s+(\d+)/);
   if (dlBand) {
     out.band = Number(dlBand[1]);
   }
 
-  // SSB freq
   const ssb = text.match(/absoluteFrequencySSB.*corresponds to\s+(\d+)\s+Hz/i);
   if (ssb) out.ssbFreq = Number(ssb[1]);
 
-  // PRB + mu
   const muPrb = text.match(/Initializing frame parms for mu\s+(\d+),\s*N_RB\s+(\d+)/i);
   if (muPrb) {
     out.mu = Number(muPrb[1]);
@@ -385,8 +381,6 @@ function parseAmfGnbTableFromTail(tailText) {
   const lines = slice.split('\n');
 
   for (const line of lines) {
-    // row example:
-    // |    1   |              Connected             | ...
     const m = line.match(/\|\s*\d+\s*\|\s*(Connected|Disconnected)\s*\|/i);
     if (!m) continue;
 
@@ -423,9 +417,9 @@ function parseAmfUeTableFromTail(tailText) {
 
     if (!m) continue;
 
-    const mmState = m[2];   // 5GMM-REGISTERED
-    const imsi = m[3];     // IMSI
-    const cellId = m[4];   // Cell ID 
+    const mmState = m[2]; 
+    const imsi = m[3];   
+    const cellId = m[4]; 
 
     out.total += 1;
     if (mmState.match('5GMM-REGISTERED')) out.registered += 1;

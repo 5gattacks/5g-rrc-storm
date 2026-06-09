@@ -109,6 +109,7 @@ If the OAI core Docker network exists, the NMS starts attached to it. This allow
 
 If the core network is not running, the NMS can still start, but the SIM/subscriber page may not work.
 
+Note that this NMS is the new version of our previous code for [SIB8 alert message](https://github.com/5gattacks/5g-sib8-alert.git).
 ## 7. Run the mitigated gNB
 
 For RF simulator mode, run:
